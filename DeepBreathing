@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Breathing Box - Hardened</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f4f8;
+            font-family: sans-serif;
+            color: #333;
+            user-select: none;
+        }
+
+        .widget-container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            width: 340px;
+            max-width: 90%;
+        }
+
+        #instruction-text {
+            font-size: 1.5rem;
+            font-weight: 600;
+            height: 2rem;
+            margin-bottom: 1rem;
+            color: #6495ED;
+        }
+
+        canvas {
+            background-color: #fafafa;
+            border-radius: 50%;
+            margin-bottom: 1.5rem;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            width: 100%;
+        }
+
+        .slider-group {
+            width: 100%;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+            accent-color: #6495ED;
+            height: 20px;
+        }
+
+        label {
+            font-size: 0.9rem;
+            color: #777;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+
+        button#toggleBtn {
+            background-color: #6495ED;
+            color: white;
+            border: none;
+            padding: 12px 35px;
+            border-radius: 25px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button#toggleBtn.active {
+            background-color: #ff7675;
+        }
+    </style>
+</head>
+<body>
+
+<div class="widget-container">
+    <div id="instruction-text">Ready?</div>
+    
+    <canvas id="breathCanvas" width="300" height="300"></canvas>
+
+    <div class="controls">
+        <button id="toggleBtn">Start Breathing</button>
+        
+        <div class="slider-group">
+            <label for="speedSlider"><span>Speed</span> <span id="speedValue">1.0x</span></label>
+            <input type="range" id="speedSlider" min="0.5" max="3.0" step="0.1" value="1.0">
+        </div>
+    </div>
+</div>
+
+<script>
+    // 1. Element Selection & Configuration
+    const canvas = document.getElementById('breathCanvas');
+    const ctx = canvas.getContext('2d');
+    const textElement = document.getElementById('instruction-text');
+    const slider = document.getElementById('speedSlider');
+    const speedDisplay = document.getElementById('speedValue');
+    const toggleBtn = document.getElementById('toggleBtn');
+
+    const baseSize = 100;
+    const expansion = 80;
+    const basePeriod = 4000; 
+    const color = '#6495ED';
+
+    let isRunning = false;
+    let startTime = 0;
+    let speedMultiplier = 1.0;
+    let animationFrameId;
+
+    let audioContext = null;
+    let gainNode = null;
+    let filterNode = null;
+
+    // 2. Audio Engine (Pink Noise Generation) - wrapped in try/catch for safety
+    function initAudio() {
+        if (audioContext) return;
+
+        try {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioContext = new AudioContext();
+            
+            // ... (Pink Noise Buffer creation code remains the same) ...
+            const bufferSize = audioContext.sampleRate * 2; 
+            const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
+            const data = buffer.getChannelData(0);
+
+            let b0=0, b1=0, b2=0, b3=0, b4=0, b5=0, b6=0;
+            for (let i = 0; i < bufferSize; i++) {
+                const white = Math.random() * 2 - 1;
+                b0 = 0.99886 * b0 + white * 0.0555179;
+                b1 = 0.99332 * b1 + white * 0.0750759;
+                b2 = 0.96900 * b2 + white * 0.1538520;
+                b3 = 0.86650 * b3 + white * 0.3104856;
+                b4 = 0.55000 * b4 + white * 0.5329522;
+                b5 = -0.7616 * b5 - white * 0.0168980;
+                data[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+                data[i] *= 0.11; 
+                b6 = white * 0.115926;
+            }
+
+            const noiseNode = audioContext.createBufferSource();
+            noiseNode.buffer = buffer;
+            noiseNode.loop = true;
+
+            filterNode = audioContext.createBiquadFilter();
+            filterNode.type = 'lowpass';
+            filterNode.frequency.value = 400;
+
+            gainNode = audioContext.createGain();
+            gainNode.gain.value = 0;
+
+            noiseNode.connect(filterNode);
+            filterNode.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            noiseNode.start(0);
+
+        } catch (e) {
+            // This ensures the program doesn't crash if AudioContext initialization fails
+            console.warn("Audio Context failed to initialize, running without sound:", e);
+        }
+    }
+    
+    // 3. Control & Lifecycle Handlers
+    slider.addEventListener('input', (e) => {
+        speedMultiplier = parseFloat(e.target.value);
+        speedDisplay.textContent = speedMultiplier.toFixed(1) + 'x';
+        if(isRunning) {
+           // Reset time to prevent the box from 'jumping' when speed changes
+           startTime = performance.now(); 
+        }
+    });
+
+    toggleBtn.addEventListener('click', toggleSession);
+
+    function toggleSession() {
+        if (isRunning) {
+            stopAnimation();
+        } else {
+            startAnimation();
+        }
+    }
+
+    function startAnimation() {
+        initAudio(); // Call inside the click handler for browser security
+        if (audioContext && audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+        
+        if (gainNode) {
+            gainNode.gain.setTargetAtTime(0.1, audioContext.currentTime, 0.5);
+        }
+
+        isRunning = true;
+        toggleBtn.textContent = "Stop";
+        toggleBtn.classList.add('active');
+        
+        startTime = performance.now();
+        loop();
+    }
+
+    function stopAnimation() {
+        isRunning = false;
+        toggleBtn.textContent = "Start Breathing";
+        toggleBtn.classList.remove('active');
+        textElement.textContent = "Paused";
+        textElement.style.opacity = 1;
+
+        if (gainNode && audioContext) {
+            gainNode.gain.setTargetAtTime(0, audioContext.currentTime, 0.2);
+        }
+        
+        cancelAnimationFrame(animationFrameId);
+        drawScene(0); 
+    }
+
+    // 4. Main Animation Loop and Drawing (Simplified)
+    function loop() {
+        if (!isRunning) return;
+
+        const now = performance.now();
+        const elapsed = now - startTime;
+        const currentPeriod = basePeriod / speedMultiplier;
+        
+        // Sine Wave Logic (0.0 at min size, 1.0 at max size)
+        const cycleProgress = (elapsed % currentPeriod) / currentPeriod;
+        const sineValue = (Math.sin(2 * Math.PI * cycleProgress - Math.PI / 2) + 1) / 2;
+
+        updateText(cycleProgress, sineValue);
+        updateAudio(sineValue);
+        drawScene(sineValue); // Use the new, simple draw function
+
+        animationFrameId = requestAnimationFrame(loop);
+    }
+
+    function updateText(progress, sineValue) {
+        if (progress < 0.5) {
+            textElement.textContent = "Breathe In...";
+        } else {
+            textElement.textContent = "Breathe Out...";
+        }
+        textElement.style.opacity = 0.4 + (sineValue * 0.6);
+    }
+
+    function updateAudio(val) {
+        if (!audioContext || !gainNode || !filterNode) return;
+
+        const minFreq = 150;
+        const maxFreq = 800;
+        const currentFreq = minFreq + (val * (maxFreq - minFreq));
+        filterNode.frequency.setTargetAtTime(currentFreq, audioContext.currentTime, 0.05);
+
+        const baseVol = 0.02; 
+        const maxVolAdd = 0.2; 
+        const currentVol = baseVol + (val * maxVolAdd);
+        gainNode.gain.setTargetAtTime(currentVol, audioContext.currentTime, 0.05);
+    }
+
+    // SIMPLIFIED DRAWING FUNCTION
+    function drawScene(val) {
+        // Calculate size based on sine value (val is 0.0 to 1.0)
+        const currentSize = baseSize + (expansion * val);
+        const center = canvas.width / 2;
+        const halfSize = currentSize / 2;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw Shadow/Glow
+        ctx.shadowBlur = 10 + (val * 30);
+        ctx.shadowColor = "rgba(100, 149, 237, 0.6)";
+
+        // *** The fix: Using the most basic rectangle drawing ***
+        ctx.fillStyle = color;
+        ctx.fillRect(center - halfSize, center - halfSize, currentSize, currentSize); 
+        
+        // Reset Shadow for performance
+        ctx.shadowBlur = 0;
+    }
+
+    // 5. Initial Static Render
+    drawScene(0);
+
+</script>
+
+</body>
+</html>
